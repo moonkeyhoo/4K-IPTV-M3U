@@ -21,8 +21,8 @@ from urllib.parse import urljoin, urlparse, urlsplit
 
 from playwright.sync_api import sync_playwright
 
-BASE = "https://iptv.cqshushu.com/"
-MULTICAST_ENTRY = "https://iptv.cqshushu.com/index.php?t=multicast"
+BASE = "https://blog.cqshushu.com/"
+MULTICAST_ENTRY = "https://blog.cqshushu.com/multicast-iptv"
 
 # 站点 ancr.js 会检测 navigator.webdriver 等；无头 Chromium 默认 true 会被拦截，页面无 #provinceSelect
 _STEALTH_INIT = """
@@ -37,7 +37,7 @@ _CHROMIUM_ARGS = [
 ]
 
 _ALLOWED_HOSTS = {
-    "iptv.cqshushu.com",
+    "blog.cqshushu.com",
     "cdnjs.cloudflare.com",
     "static.cloudflareinsights.com",
 }
@@ -256,22 +256,22 @@ def _extract_rows(page) -> list[MulticastRow]:
 
 def _is_multicast_list_page(url: str) -> bool:
     u = (url or "").lower()
-    return "iptv.cqshushu.com" in u and "t=multicast" in u and "index.php?p=" not in u
+    return "blog.cqshushu.com" in u and "multicast-iptv" in u
 
 
 def _ensure_multicast_list(page, args) -> bool:
-    """进入带筛选框的组播列表页；若已在列表页则跳过整页 goto。"""
+    """进入 blog 组播列表页；若已在列表页则跳过整页 goto。"""
     try:
-        if _is_multicast_list_page(page.url) and page.locator("#provinceSelect").count() > 0:
+        if _is_multicast_list_page(page.url) and page.locator('select[name="region"]').count() > 0:
             return True
     except Exception:
         pass
     page.goto(MULTICAST_ENTRY, wait_until="domcontentloaded", timeout=args.timeout_ms)
     try:
-        page.wait_for_selector("#provinceSelect", state="visible", timeout=min(90000, args.timeout_ms))
+        page.wait_for_selector('select[name="region"]', state="visible", timeout=min(30000, args.timeout_ms))
     except Exception as e:
         print(
-            f"[skip] multicast list missing #provinceSelect ({e!s}); url={page.url!r}",
+            f"[skip] blog multicast page missing region select ({e!s}); url={page.url!r}",
             file=sys.stderr,
         )
         raise SiteBlockedError("multicast list blocked")
@@ -302,62 +302,70 @@ def process_region(
     set_limit: bool,
 ) -> str | None:
     _ensure_multicast_list(page, args)
-    page.wait_for_timeout(200)
+    page.wait_for_timeout(150)
     if set_limit:
         try:
-            page.locator("#limitSelect").select_option(str(args.per_page), timeout=15000)
-            page.wait_for_timeout(450)
+            page.locator('select[name="limit"]').select_option(str(args.per_page), timeout=8000)
+            page.wait_for_timeout(250)
         except Exception:
             pass
     try:
-        page.locator("#provinceSelect").select_option(code, timeout=12000)
+        page.locator('select[name="region"]').select_option(code, timeout=8000)
+        page.locator(".btn-search").click(timeout=5000)
     except Exception as e:
         print(f"[skip] {region_zh}: province select failed: {e!s}", file=sys.stderr)
         raise SiteBlockedError(f"province select blocked: {region_zh}")
-    page.wait_for_timeout(700)
+    page.wait_for_timeout(500)
     try:
-        page.wait_for_selector(
-            'section[aria-label="组播源列表"] tbody tr',
-            state="visible",
-            timeout=25000,
-        )
+        page.wait_for_selector("table.hotel-iptv-table tbody tr", state="visible", timeout=10000)
     except Exception:
         pass
 
-    rows = _extract_rows(page)
-    row = _pick_row(rows, region_zh)
-    if not row:
+    tr_list = page.locator("table.hotel-iptv-table tbody tr")
+    n = tr_list.count()
+    target_idx = -1
+    for i in range(n):
+        tr = tr_list.nth(i)
+        tds = tr.locator("td")
+        if tds.count() < 6:
+            continue
+        status = tds.nth(5).inner_text().strip()
+        typ = tds.nth(2).inner_text().strip()
+        if region_zh not in typ:
+            continue
+        if "失效" in status:
+            continue
+        if ("新上线" in status) or ("可用" in status) or ("正常" in status):
+            target_idx = i
+            break
+    if target_idx < 0:
         print(f"[skip] {region_zh}: no multicast rows", file=sys.stderr)
         return None
 
-    detail_url = f"{BASE.rstrip('/')}/index.php?p={row.token}&t=multicast"
-    page.goto(detail_url, wait_until="domcontentloaded", timeout=args.timeout_ms)
-    page.wait_for_timeout(800)
+    tr = tr_list.nth(target_idx)
+    ip_link = tr.locator("a.ip-link").first
+    ip_link.click(timeout=5000)
+    page.wait_for_timeout(700)
+    try:
+        page.wait_for_selector(".back-to-list, .view-channel-list", state="attached", timeout=6000)
+    except Exception:
+        pass
     html = page.content()
 
-    # 查看频道列表 — button or link (new tab or in-page)
+    # 查看频道列表（blog 为同页 Ajax 切换）
     for name in ("查看频道列表", "频道列表"):
         loc = page.get_by_text(name, exact=False)
         if loc.count() == 0:
             continue
         try:
-            with page.expect_popup(timeout=8000) as pop:
-                loc.first.click()
-            newp = pop.value
-            newp.wait_for_load_state("domcontentloaded", timeout=args.timeout_ms)
-            html = newp.content()
-            newp.close()
+            loc.first.click(timeout=5000)
+            page.wait_for_timeout(1000)
+            html = page.content()
             break
         except Exception:
-            try:
-                loc.first.click()
-                page.wait_for_timeout(1500)
-                html = page.content()
-                break
-            except Exception:
-                continue
+            continue
 
-    m3u_url = _find_m3u_download_url(html, page.url)
+    m3u_url = _find_m3u_download_url(html, BASE)
     pairs: list[tuple[str, str]] | None = None
 
     if m3u_url:
@@ -370,7 +378,7 @@ def process_region(
             pairs = None
 
     if not pairs:
-        anchor_pairs = _extract_channel_pairs_from_html(html, page.url)
+        anchor_pairs = _extract_channel_pairs_from_html(html, BASE)
         if anchor_pairs:
             if any(
                 _probe_m3u8(context, url, args.probe_timeout_ms)
@@ -379,7 +387,7 @@ def process_region(
                 pairs = anchor_pairs
 
     if not pairs:
-        m3u8s = _collect_m3u8_hrefs(html, page.url)
+        m3u8s = _collect_m3u8_hrefs(html, BASE)
         tested: list[str] = []
         for u in m3u8s[: args.test_top_n]:
             if _probe_m3u8(context, u, args.probe_timeout_ms):
