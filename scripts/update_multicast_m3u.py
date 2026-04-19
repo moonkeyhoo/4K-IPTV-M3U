@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import urljoin, urlparse, urlsplit
+from urllib.parse import urljoin, urlparse
 
 from playwright.sync_api import sync_playwright
 
@@ -37,23 +37,13 @@ _CHROMIUM_ARGS = [
     "--disable-setuid-sandbox",
 ]
 
-_ALLOWED_HOSTS = {
-    "blog.cqshushu.com",
-    "iptv.cqshushu.com",
-    "cdnjs.cloudflare.com",
-    "static.cloudflareinsights.com",
-}
-
-
 class SiteBlockedError(RuntimeError):
     """Raised when anti-bot blocks list interactions."""
 
 
 def _route_filter(route):
     req = route.request
-    host = (urlsplit(req.url).hostname or "").lower()
-    if host and host not in _ALLOWED_HOSTS:
-        return route.abort()
+    # 只拦截大体积静态资源，避免触发目标站点的反广告拦截逻辑
     if req.resource_type in {"image", "media", "font"}:
         return route.abort()
     return route.continue_()
