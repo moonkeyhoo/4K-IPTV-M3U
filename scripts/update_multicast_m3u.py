@@ -144,6 +144,28 @@ def _parse_m3u_text(text: str) -> list[tuple[str, str]]:
     return out
 
 
+def _parse_plain_channel_lines(text: str) -> list[tuple[str, str]]:
+    """Parse loose 'name,url' lines when not a strict M3U file."""
+    out: list[tuple[str, str]] = []
+    for raw in text.splitlines():
+        ln = raw.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        if "," in ln:
+            name, maybe_url = ln.split(",", 1)
+            name = name.strip()
+            maybe_url = maybe_url.strip()
+            if name and (maybe_url.startswith("http://") or maybe_url.startswith("https://")):
+                out.append((name, maybe_url))
+        elif "http://" in ln or "https://" in ln:
+            m = re.search(r"(https?://\S+)", ln)
+            if m:
+                url = m.group(1).strip()
+                head = ln.replace(url, "").strip(" ,-|\t")
+                out.append((head or "live", url))
+    return out
+
+
 def _rewrite_m3u(region_zh: str, pairs: Iterable[tuple[str, str]]) -> str:
     lines = ["#EXTM3U"]
     for name, url in pairs:
@@ -367,12 +389,31 @@ def process_region(
     m3u_url = _find_m3u_download_url(html, BASE)
     pairs: list[tuple[str, str]] | None = None
 
-    if m3u_url:
+    # 优先点“M3U下载”拿真实文件，避免页面不直接暴露 m3u8 链接
+    for dl_text in ("M3U下载", "下载M3U", "下载 m3u", "m3u 下载"):
+        dl = page.get_by_text(dl_text, exact=False)
+        if dl.count() == 0:
+            continue
+        try:
+            with page.expect_download(timeout=7000) as dlinfo:
+                dl.first.click(timeout=4000)
+            download = dlinfo.value
+            tmp = Path(args.output_dir).resolve() / ".tmp_download.m3u"
+            download.save_as(str(tmp))
+            raw = tmp.read_text(encoding="utf-8", errors="ignore")
+            tmp.unlink(missing_ok=True)
+            pairs = _parse_m3u_text(raw) or _parse_plain_channel_lines(raw)
+            if pairs:
+                break
+        except Exception:
+            continue
+
+    if (not pairs) and m3u_url:
         try:
             r = context.request.get(m3u_url, timeout=args.timeout_ms)
             if r.ok:
                 raw = r.text()
-                pairs = _parse_m3u_text(raw)
+                pairs = _parse_m3u_text(raw) or _parse_plain_channel_lines(raw)
         except Exception:
             pairs = None
 
