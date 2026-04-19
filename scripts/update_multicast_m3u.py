@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
 import re
 import sys
 import time
@@ -22,6 +23,18 @@ from playwright.sync_api import sync_playwright
 
 BASE = "https://iptv.cqshushu.com/"
 MULTICAST_ENTRY = "https://iptv.cqshushu.com/index.php?t=multicast"
+
+# 站点 ancr.js 会检测 navigator.webdriver 等；无头 Chromium 默认 true 会被拦截，页面无 #provinceSelect
+_STEALTH_INIT = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+"""
+
+_CHROMIUM_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+]
 
 # 站点里明确境外地区，默认不跑（与「国内」批处理一致）
 OVERSEAS_REGION_CODES = frozenset({"vn", "ru"})
@@ -236,16 +249,24 @@ def _pick_row(rows: list[MulticastRow], region_zh: str) -> MulticastRow | None:
 def process_region(page, context, code: str, region_zh: str, slug: str, args) -> str | None:
     # 不用 networkidle：第三方广告/统计会让页面长期不“静默”，动辄等满超时。
     page.goto(MULTICAST_ENTRY, wait_until="domcontentloaded", timeout=args.timeout_ms)
-    page.wait_for_timeout(800)
     try:
-        page.select_option("#provinceSelect", code)
-    except Exception:
-        print(f"[skip] {region_zh}: province select failed", file=sys.stderr)
+        page.wait_for_selector("#provinceSelect", state="visible", timeout=min(90000, args.timeout_ms))
+    except Exception as e:
+        print(
+            f"[skip] {region_zh}: multicast page missing #provinceSelect ({e!s}); url={page.url!r}",
+            file=sys.stderr,
+        )
+        return None
+    page.wait_for_timeout(600)
+    try:
+        page.locator("#provinceSelect").select_option(code, timeout=45000)
+    except Exception as e:
+        print(f"[skip] {region_zh}: province select failed: {e!s}", file=sys.stderr)
         return None
     page.wait_for_load_state("load", timeout=args.timeout_ms)
     page.wait_for_timeout(400)
     try:
-        page.select_option("#limitSelect", str(args.per_page))
+        page.locator("#limitSelect").select_option(str(args.per_page), timeout=20000)
     except Exception:
         pass
     page.wait_for_timeout(300)
@@ -350,14 +371,28 @@ def main() -> int:
     regions = [(c, z, s) for c, z, s in base if not want or c in want]
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        launch_kw = {"headless": True, "args": _CHROMIUM_ARGS}
+        browser = None
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            try:
+                browser = p.chromium.launch(channel="chrome", **launch_kw)
+            except Exception:
+                browser = None
+        if browser is None:
+            browser = p.chromium.launch(**launch_kw)
+        ua = (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+            if platform.system() == "Linux"
+            else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
         context = browser.new_context(
             locale="zh-CN",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ),
+            viewport={"width": 1365, "height": 900},
+            user_agent=ua,
         )
+        context.add_init_script(_STEALTH_INIT)
         page = context.new_page()
         for code, zh, slug in regions:
             path = out_dir / f"{slug}4K.m3u"
