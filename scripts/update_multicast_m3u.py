@@ -231,20 +231,21 @@ def _pick_row(rows: list[MulticastRow], region_zh: str) -> MulticastRow | None:
 
 
 def process_region(page, context, code: str, region_zh: str, slug: str, args) -> str | None:
+    # 不用 networkidle：第三方广告/统计会让页面长期不“静默”，动辄等满超时。
     page.goto(MULTICAST_ENTRY, wait_until="domcontentloaded", timeout=args.timeout_ms)
-    page.wait_for_timeout(1500)
+    page.wait_for_timeout(800)
     try:
         page.select_option("#provinceSelect", code)
     except Exception:
         print(f"[skip] {region_zh}: province select failed", file=sys.stderr)
         return None
-    page.wait_for_load_state("networkidle", timeout=args.timeout_ms)
-    page.wait_for_timeout(800)
+    page.wait_for_load_state("load", timeout=args.timeout_ms)
+    page.wait_for_timeout(400)
     try:
         page.select_option("#limitSelect", str(args.per_page))
     except Exception:
         pass
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(300)
 
     rows = _extract_rows(page)
     row = _pick_row(rows, region_zh)
@@ -254,7 +255,7 @@ def process_region(page, context, code: str, region_zh: str, slug: str, args) ->
 
     detail_url = f"{BASE.rstrip('/')}/index.php?p={row.token}&t=multicast"
     page.goto(detail_url, wait_until="domcontentloaded", timeout=args.timeout_ms)
-    page.wait_for_timeout(1200)
+    page.wait_for_timeout(800)
     html = page.content()
 
     # 查看频道列表 — button or link (new tab or in-page)
@@ -273,7 +274,7 @@ def process_region(page, context, code: str, region_zh: str, slug: str, args) ->
         except Exception:
             try:
                 loc.first.click()
-                page.wait_for_timeout(2500)
+                page.wait_for_timeout(1500)
                 html = page.content()
                 break
             except Exception:
@@ -355,7 +356,7 @@ def main() -> int:
                 if text:
                     path.write_text(text, encoding="utf-8")
                     print(f"[ok] {path.name} ({zh})")
-                time.sleep(0.8)
+                time.sleep(0.35)
             except Exception as e:
                 print(f"[err] {zh}: {e}", file=sys.stderr)
         browser.close()

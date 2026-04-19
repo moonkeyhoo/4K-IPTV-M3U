@@ -27,6 +27,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      # 避免每次工作流都重新下载 Chromium（常占数分钟）
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
