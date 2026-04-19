@@ -23,6 +23,9 @@ from playwright.sync_api import sync_playwright
 BASE = "https://iptv.cqshushu.com/"
 MULTICAST_ENTRY = "https://iptv.cqshushu.com/index.php?t=multicast"
 
+# 站点里明确境外地区，默认不跑（与「国内」批处理一致）
+OVERSEAS_REGION_CODES = frozenset({"vn", "ru"})
+
 # province code, Chinese name, output slug (file: {slug}4K.m3u)
 REGIONS: list[tuple[str, str, str]] = [
     ("hb", "湖北", "hubei"),
@@ -331,13 +334,20 @@ def main() -> int:
     ap.add_argument("--per-page", type=int, default=10, help="Rows per page (site select limit)")
     ap.add_argument("--test-top-n", type=int, default=8, help="How many m3u8 URLs to probe")
     ap.add_argument("--regions", default="", help="Comma province codes, e.g. hb,sc (default: all)")
+    ap.add_argument(
+        "--include-overseas",
+        action="store_true",
+        help="Also scrape vn/ru (Vietnam, Russia); default is domestic-only.",
+    )
     args = ap.parse_args()
 
     out_dir = Path(args.output_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     want = {x.strip().lower() for x in args.regions.split(",") if x.strip()}
-    regions = [(c, z, s) for c, z, s in REGIONS if not want or c in want]
+    skip_overseas = OVERSEAS_REGION_CODES if not args.include_overseas else frozenset()
+    base = [(c, z, s) for c, z, s in REGIONS if c not in skip_overseas]
+    regions = [(c, z, s) for c, z, s in base if not want or c in want]
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
