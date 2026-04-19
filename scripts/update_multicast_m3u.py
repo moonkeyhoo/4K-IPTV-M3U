@@ -23,6 +23,7 @@ from playwright.sync_api import sync_playwright
 
 BASE = "https://blog.cqshushu.com/"
 MULTICAST_ENTRY = "https://blog.cqshushu.com/multicast-iptv"
+IPTV_MULTICAST_ENTRY = "https://iptv.cqshushu.com/index.php?t=multicast"
 
 # 站点 ancr.js 会检测 navigator.webdriver 等；无头 Chromium 默认 true 会被拦截，页面无 #provinceSelect
 _STEALTH_INIT = """
@@ -334,6 +335,13 @@ def _ensure_multicast_list(page, args) -> bool:
     return True
 
 
+def _ensure_iptv_verified(page, args) -> None:
+    """Warm up iptv.cqshushu.com JS challenge to set verification cookie."""
+    page.goto(IPTV_MULTICAST_ENTRY, wait_until="domcontentloaded", timeout=args.timeout_ms)
+    # 页面脚本会写 list_js_verified 并跳转 _js=1；给它一点执行时间
+    page.wait_for_timeout(1500)
+
+
 def _available_region_codes(page) -> set[str]:
     vals: set[str] = set()
     opts = page.locator('select[name="region"] option')
@@ -432,6 +440,12 @@ def process_region(
     page.goto(detail_url, wait_until="domcontentloaded", timeout=args.timeout_ms)
     page.wait_for_timeout(800)
     html = page.content()
+    # 若被 iptv 站点拦截，先做一次域名验证后重试详情页
+    if ("验证失败" in html) or ("请求失败" in html):
+        _ensure_iptv_verified(page, args)
+        page.goto(detail_url, wait_until="domcontentloaded", timeout=args.timeout_ms)
+        page.wait_for_timeout(900)
+        html = page.content()
 
     # 查看频道列表（blog 为同页 Ajax 切换）
     for name in ("查看频道列表", "频道列表"):
@@ -561,6 +575,12 @@ def main() -> int:
             print("[fatal] cannot open multicast list page", file=sys.stderr)
             browser.close()
             return 1
+        # 先在 iptv 域名完成一次 JS 验证，后续详情页才能正常拿到频道按钮
+        try:
+            _ensure_iptv_verified(page, args)
+            _ensure_multicast_list(page, args)
+        except Exception as e:
+            print(f"[warn] iptv verification warmup failed: {e!s}", file=sys.stderr)
         available_codes = _available_region_codes(page)
         consecutive_fail = 0
         for i, (code, zh, slug) in enumerate(regions):
