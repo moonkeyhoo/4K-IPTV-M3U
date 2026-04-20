@@ -23,6 +23,24 @@ PROVINCES = ["北京", "天津", "河北", "山西", "内蒙古", "辽宁", "吉
              "广东", "广西", "海南", "重庆", "四川", "贵州", "云南", "西藏", "陕西", 
              "甘肃", "青海", "宁夏", "新疆"]
 
+
+def is_quota_or_auth_limited(resp_json, status_code):
+    """判断是否为额度/鉴权限制，便于切换备用 token。"""
+    if status_code in (401, 403, 429):
+        return True
+    if not isinstance(resp_json, dict):
+        return False
+    code = str(resp_json.get("code", ""))
+    msg = str(resp_json.get("message", "")) + " " + str(resp_json.get("msg", ""))
+    msg = msg.lower()
+    quota_keywords = ("额度", "配额", "quota", "limit", "rate")
+    auth_keywords = ("token", "auth", "unauthorized", "forbidden", "鉴权", "权限")
+    return (
+        code in {"401", "403", "429"}
+        or any(k in msg for k in quota_keywords)
+        or any(k in msg for k in auth_keywords)
+    )
+
 def get_root_domain(domain):
     """提取根域名，防 DDNS 假去重"""
     if re.match(r'^\d+\.\d+\.\d+\.\d+$', domain): return domain
@@ -79,22 +97,45 @@ def check_and_clear_existing(txt_file, m3u_file):
 
 def get_quake_assets(province):
     """针对指定省份请求节点"""
-    quake_token = (os.environ.get("QUAKE_TOKEN") or "").strip()
-    if not quake_token:
-        print("[-] 未检测到 QUAKE_TOKEN 环境变量，无法请求 Quake 接口。")
+    token1 = (os.environ.get("QUAKE_TOKEN") or "").strip()
+    token2 = (os.environ.get("QUAKE_TOKEN2") or "").strip()
+    token_list = [t for t in (token1, token2) if t]
+    if not token_list:
+        print("[-] 未检测到 QUAKE_TOKEN / QUAKE_TOKEN2 环境变量，无法请求 Quake 接口。")
         return []
 
     url = "https://quake.360.net/api/v3/search/quake_service"
     query_str = f'app:"udpxy" AND is_domain:true AND province:"{province}"'
-    headers = {"X-QuakeToken": quake_token, "Content-Type": "application/json"}
     payload = {"query": query_str, "start": 0, "size": 20, "is_domain": True}
 
     print(f"[*] 正在请求 [{province}] 地区的新节点...")
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
-        if response.status_code == 200 and response.json().get('code') == 0:
-            return response.json().get('data', [])
-    except Exception: pass
+    for idx, token in enumerate(token_list, start=1):
+        headers = {"X-QuakeToken": token, "Content-Type": "application/json"}
+        token_name = f"QUAKE_TOKEN{'' if idx == 1 else '2'}"
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=15)
+            resp_json = {}
+            try:
+                resp_json = response.json()
+            except Exception:
+                resp_json = {}
+
+            if response.status_code == 200 and resp_json.get('code') == 0:
+                if idx > 1:
+                    print(f"[*] 已切换到 {token_name} 并请求成功。")
+                return resp_json.get('data', [])
+
+            if is_quota_or_auth_limited(resp_json, response.status_code):
+                print(f"[!] {token_name} 额度/鉴权受限，尝试切换下一个 token...")
+                continue
+
+            print(f"[-] {token_name} 请求失败: status={response.status_code}, resp={resp_json}")
+            return []
+        except Exception as e:
+            print(f"[-] {token_name} 请求异常: {e}")
+            continue
+
+    print("[-] 所有可用 Quake token 都不可用，本次跳过。")
     return []
 
 def txt_to_m3u_format(txt_content, group_title):

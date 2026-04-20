@@ -58,5 +58,6 @@ jobs:
             echo "No changes to commit."
           else
             git commit -m "chore: auto update rtp sources"
+            git pull --rebase origin main
             git push
           fi
