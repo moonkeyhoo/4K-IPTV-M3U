@@ -197,11 +197,26 @@ def parse_channel_lines(channels_html: str) -> list[str]:
         play_url = _strip_html(tds[2])
         if not name or not play_url:
             continue
-        m = re.search(r"/(udp|rtp|igmp)/(\d+\.\d+\.\d+\.\d+:\d+)", play_url, flags=re.IGNORECASE)
-        if not m:
+        # 保留站点返回的完整播放地址（含服务器 IP:PORT），避免只剩组播段地址
+        if not re.search(r"(https?://|rtp/|udp/|igmp/)", play_url, flags=re.IGNORECASE):
             continue
-        lines.append(f"{name},{m.group(1).lower()}/{m.group(2)}")
+        lines.append(f"{name},{play_url}")
     return lines
+
+
+def normalize_group_title(raw_type: str, province: str) -> str:
+    """将站点 type 字段规范化为“省份+运营商”格式（如：江西电信）。"""
+    text = (raw_type or "").strip()
+    if not text:
+        return province
+    # 常见格式：江西上饶组播|江西电信，优先使用“|”后半段
+    if "|" in text:
+        right = text.split("|")[-1].strip()
+        if right:
+            return right
+    # 兜底：去掉“组播”后缀噪音
+    text = text.replace("组播", "").strip()
+    return text or province
 
 def fetch_channel_lines_by_province(province: str):
     rows = fetch_region_rows_by_ajax(province, limit=20)
@@ -273,7 +288,7 @@ def fetch_channel_lines_by_province(province: str):
     lines = parse_channel_lines(channels_html)
     if not lines:
         return [], "channel_lines_empty", province
-    return lines, "ok", picked.get("type", province)
+    return lines, "ok", normalize_group_title(picked.get("type", province), province)
 
 
 def extract_test_targets(template_content, max_targets=5):
