@@ -124,7 +124,7 @@ def _parse_rows_from_html_fragment(fragment_html):
     return result
 
 
-def fetch_region_rows_by_ajax(province, limit=20):
+def fetch_region_rows_by_ajax(province, limit=20, max_pages=30):
     print(f"[*] 正在抓取组播源页面: {MULTICAST_SOURCE_URL}")
     session = requests.Session()
     session.headers.update({
@@ -152,31 +152,54 @@ def fetch_region_rows_by_ajax(province, limit=20):
         print(f"[-] 页面中未找到省份 [{province}] 的 region code。")
         return []
 
-    payload = {
-        "action": "multicast_iptv_ajax",
-        "action_type": "list",
-        "page_num": 1,
-        "limit": limit,
-        "region": region_code,
-        "search": "",
-        "nonce": ajax_cfg.get("nonce", ""),
-        "token": _encrypt_token(ajax_cfg.get("token", "")),
-    }
-    try:
-        resp = session.post(ajax_cfg.get("ajaxUrl", ""), data=payload, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        print(f"[-] Ajax 请求省份 [{province}] 失败: {e}")
-        return []
-    if not data.get("success"):
-        msg = data.get("data", {}).get("message", "unknown error")
-        print(f"[-] Ajax 返回失败: {msg}")
-        return []
-    fragment = data.get("data", {}).get("html", "")
-    rows = _parse_rows_from_html_fragment(fragment)
-    print(f"[*] [{province}] Ajax 返回 {len(rows)} 条服务器。")
-    return rows
+    all_rows = []
+    seen_tokens = set()
+    empty_page_hits = 0
+
+    for page_num in range(1, max_pages + 1):
+        payload = {
+            "action": "multicast_iptv_ajax",
+            "action_type": "list",
+            "page_num": page_num,
+            "limit": limit,
+            "region": region_code,
+            "search": "",
+            "nonce": ajax_cfg.get("nonce", ""),
+            "token": _encrypt_token(ajax_cfg.get("token", "")),
+        }
+        try:
+            resp = session.post(ajax_cfg.get("ajaxUrl", ""), data=payload, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"[-] Ajax 请求省份 [{province}] 第{page_num}页失败: {e}")
+            break
+        if not data.get("success"):
+            msg = data.get("data", {}).get("message", "unknown error")
+            print(f"[-] Ajax 第{page_num}页返回失败: {msg}")
+            break
+
+        fragment = data.get("data", {}).get("html", "")
+        rows = _parse_rows_from_html_fragment(fragment)
+        if not rows:
+            empty_page_hits += 1
+            if empty_page_hits >= 2:
+                break
+            continue
+
+        empty_page_hits = 0
+        added = 0
+        for row in rows:
+            token = row.get("p_token")
+            if not token or token in seen_tokens:
+                continue
+            seen_tokens.add(token)
+            all_rows.append(row)
+            added += 1
+        print(f"[*] [{province}] 第{page_num}页 {len(rows)} 条，新增 {added} 条。")
+
+    print(f"[*] [{province}] 全分页合计 {len(all_rows)} 条服务器。")
+    return all_rows
 
 
 def get_region_assets(province, rows=None):
@@ -268,8 +291,8 @@ def parse_operator_name(detail_html: str, province: str) -> str:
             return f"{province}{carrier}"
     return province
 
-def fetch_channel_lines_by_province(province: str, max_per_carrier: int = 3):
-    rows = fetch_region_rows_by_ajax(province, limit=20)
+def fetch_channel_lines_by_province(province: str, max_per_carrier: int = 3, max_pages: int = 30):
+    rows = fetch_region_rows_by_ajax(province, limit=20, max_pages=max_pages)
     if not rows:
         return [], "list_empty", province
 
@@ -424,7 +447,7 @@ def txt_to_m3u_format(txt_content, group_title):
     return "\n".join(m3u_lines)
 
 
-def _build_readme_table_rows(repo_root: str, subdir: str, ext: str) -> str:
+def _build_readme_table_rows(repo_root: str, subdir: str, ext: str, updated_at: str) -> str:
     target_dir = os.path.join(repo_root, subdir)
     if not os.path.exists(target_dir):
         return '<tr><td colspan="4">暂无文件</td></tr>'
@@ -438,20 +461,19 @@ def _build_readme_table_rows(repo_root: str, subdir: str, ext: str) -> str:
         encoded_name = quote(name)
         raw_url = f"{RAW_BASE_URL}/{subdir}/{encoded_name}"
         proxy_url = f"{PROXY_PREFIX}{raw_url}"
-        updated = datetime.fromtimestamp(os.path.getmtime(file_path)).strftime("%Y-%m-%d %H:%M:%S")
         rows.append(
             "<tr>"
             f'<td style="white-space:nowrap;">{name}</td>'
             f'<td style="white-space:nowrap;"><a href="{proxy_url}">下载链接</a></td>'
-            f'<td style="white-space:nowrap;">{updated}</td>'
+            f'<td style="white-space:nowrap;">{updated_at}</td>'
             f'<td><code>{proxy_url}</code></td>'
             "</tr>"
         )
     return "\n".join(rows)
 
 
-def _build_readme_section_table(repo_root: str, subdir: str, ext: str) -> str:
-    rows = _build_readme_table_rows(repo_root, subdir, ext)
+def _build_readme_section_table(repo_root: str, subdir: str, ext: str, updated_at: str) -> str:
+    rows = _build_readme_table_rows(repo_root, subdir, ext, updated_at)
     return (
         '<table style="width:100%; table-layout:auto;">\n'
         "<colgroup>\n"
@@ -483,8 +505,9 @@ def update_readme_file_list(repo_root: str) -> None:
     with open(readme_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    m3u_table = _build_readme_section_table(repo_root, "m3u", ".m3u")
-    txt_table = _build_readme_section_table(repo_root, "txt", ".txt")
+    updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    m3u_table = _build_readme_section_table(repo_root, "m3u", ".m3u", updated_at)
+    txt_table = _build_readme_section_table(repo_root, "txt", ".txt", updated_at)
     m3u_block = f"## M3U 文件列表\n\n{m3u_table}\n"
     txt_block = f"## TXT 文件列表\n\n{txt_table}\n"
 
@@ -509,7 +532,7 @@ def update_readme_file_list(repo_root: str) -> None:
         f.write(content)
     print("[+] README.md 文件列表已自动更新。")
 
-def process_province(province, txt_output_dir, m3u_output_dir):
+def process_province(province, txt_output_dir, m3u_output_dir, max_pages=30):
     """单一省份核心流水线"""
     group_title = province
     out_txt = os.path.join(txt_output_dir, f"{group_title}.txt")
@@ -519,7 +542,7 @@ def process_province(province, txt_output_dir, m3u_output_dir):
     if check_and_clear_existing(out_txt, out_m3u): return
 
     # 2. 直接从频道列表提取 频道名+播放地址
-    channel_lines, status, fetched_group_title = fetch_channel_lines_by_province(province)
+    channel_lines, status, fetched_group_title = fetch_channel_lines_by_province(province, max_pages=max_pages)
     if not channel_lines:
         print(f"[-] [{province}] 频道提取失败: {status}")
         return
@@ -608,6 +631,12 @@ def parse_args():
         default="",
         help="仅处理指定省份。例如：--only-province 湖北",
     )
+    ap.add_argument(
+        "--max-pages",
+        type=int,
+        default=30,
+        help="每个省份最多抓取分页数量（默认30）。",
+    )
     return ap.parse_args()
 
 
@@ -619,7 +648,10 @@ def main():
     m3u_output_dir = os.path.join(repo_root, "m3u")
 
     if args.test_region:
-        channel_lines, status, group_title = fetch_channel_lines_by_province(args.test_region)
+        channel_lines, status, group_title = fetch_channel_lines_by_province(
+            args.test_region,
+            max_pages=args.max_pages,
+        )
         print(f"\n[*] 测试结果: 地区={args.test_region}，分组={group_title}，状态={status}，频道数={len(channel_lines)}")
         for line in channel_lines[:10]:
             print(f"  - {line}")
@@ -636,7 +668,7 @@ def main():
         print(f"\n" + "="*50)
         print(f" 正在处理地区任务: {province}")
         print("="*50)
-        process_province(province, txt_output_dir, m3u_output_dir)
+        process_province(province, txt_output_dir, m3u_output_dir, max_pages=args.max_pages)
 
     generated_files = []
     generated_files.extend(
